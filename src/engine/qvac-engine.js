@@ -15,6 +15,16 @@
 import { resolvePath } from "../config.js";
 import { buildVisionDelegate } from "../p2p/delegate.js";
 
+/**
+ * Grounded decoding for the vision model. A 500M on-device VLM left on default
+ * (random) sampling will sometimes hallucinate a plausible-but-wrong scene
+ * ("describes something else entirely"). Greedy argmax (`temp: 0`, `top_k: 1`)
+ * keeps the description faithful to the pixels and reproducible; a mild
+ * `repeat_penalty` prevents the degenerate "…in the center of the…" loops a
+ * tiny model can fall into.
+ */
+const VISION_GEN_PARAMS = { temp: 0, top_k: 1, seed: 42, repeat_penalty: 1.1 };
+
 export class QvacEngine {
   /**
    * @param {import("./types.js").LanternConfig} cfg
@@ -177,9 +187,12 @@ export class QvacEngine {
    * @param {{capability: string, modelId: string, history: any[], model: string, delegated: boolean}} args
    * @param {AbortSignal} [signal]
    */
-  async #streamCompletion({ capability, modelId, history, model, delegated }, signal) {
+  async #streamCompletion({ capability, modelId, history, model, delegated, gen }, signal) {
     const stop = this.logger.startTimer();
-    const result = this.sdk.completion({ modelId, history, stream: true });
+    /** @type {any} */
+    const params = { modelId, history, stream: true };
+    if (gen) params.generationParams = gen;
+    const result = this.sdk.completion(params);
     let text = "";
     let tokens = 0;
     /** @type {number | null} */
@@ -227,11 +240,16 @@ export class QvacEngine {
     return this.#streamCompletion({ capability: "llm", modelId, history, model, delegated: false }, signal);
   }
 
-  /** @param {{imagePath: string, prompt: string, signal?: AbortSignal}} opts */
-  async describeImage({ imagePath, prompt, signal }) {
+  /**
+   * Describe an image. Vision decoding defaults to grounded/greedy sampling
+   * (`temp: 0`) so a small on-device VLM stays faithful to the pixels instead of
+   * inventing a plausible-but-wrong scene. Callers may override `gen`.
+   * @param {{imagePath: string, prompt: string, signal?: AbortSignal, gen?: any}} opts
+   */
+  async describeImage({ imagePath, prompt, signal, gen = VISION_GEN_PARAMS }) {
     const { modelId, model, delegated } = await this.#ensureModel("vision");
     const history = [{ role: "user", content: prompt, attachments: [{ path: resolvePath(this.cfg, imagePath) }] }];
-    return this.#streamCompletion({ capability: "vision", modelId, history, model, delegated }, signal);
+    return this.#streamCompletion({ capability: "vision", modelId, history, model, delegated, gen }, signal);
   }
 
   /** @param {{imagePath: string}} opts */
